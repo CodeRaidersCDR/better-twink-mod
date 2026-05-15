@@ -47,6 +47,8 @@ public class ChestConfiguration {
     private boolean      dirty           = true;
     private long         lastScanTick    = 0;
     private long         lockedUntilTick = 0;
+    // FIX BUG #9: track double-chest so contents span both halves
+    private boolean      isDouble        = false;
 
     // Legacy (backward compat for GUI / serialization)
     private List<String>  allowedMods  = new ArrayList<>();
@@ -85,6 +87,9 @@ public class ChestConfiguration {
     public void setCachedFreeSlots(int s)        { cachedFreeSlots = s; }
     public void setLockedUntilTick(long t)       { lockedUntilTick = t; }
     public void setQuickDrop(boolean qd)         { role = qd ? Role.QUICK_DROP : Role.STORAGE; }
+    // FIX BUG #9: double-chest flag
+    public boolean isDouble()                    { return isDouble; }
+    public void    setDouble(boolean d)          { isDouble = d; }
 
     // ── Legacy API ────────────────────────────────────────────────
     public void addAllowedMod(String modId) {
@@ -120,6 +125,16 @@ public class ChestConfiguration {
         }
         cachedFreeSlots = Math.max(0, totalSlots - used);
         dirty = false;
+    }
+
+    /**
+     * FIX BUG #7: Clears cached contents and marks the chest dirty so the next
+     * planning cycle forces a re-scan instead of using stale data.
+     */
+    public void invalidateCachedContents() {
+        cachedContents.clear();
+        cachedFreeSlots = isDouble ? 54 : 27;
+        dirty = true;
     }
 
     public boolean containsItemType(ItemStack stack) {
@@ -219,6 +234,9 @@ public class ChestConfiguration {
         for (CraftRule cr : craftRulesNew) craftTag.add(cr.serializeNBT());
         tag.put("CraftRules", craftTag);
 
+        // FIX BUG #9: persist double-chest flag
+        tag.putBoolean("IsDouble", isDouble);
+
         return tag;
     }
 
@@ -256,6 +274,9 @@ public class ChestConfiguration {
         for (int i = 0; i < craftTag.size(); i++) {
             try { c.craftRulesNew.add(CraftRule.deserializeNBT(craftTag.getCompound(i))); } catch (Exception ignored) {}
         }
+
+        // FIX BUG #9: restore double-chest flag
+        if (tag.contains("IsDouble")) c.isDouble = tag.getBoolean("IsDouble");
 
         return c;
     }

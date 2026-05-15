@@ -19,6 +19,8 @@ import java.util.*;
  *
  * <p>Rules ({@link CraftRule}) are evaluated here; actual multi-tick execution is driven
  * by the bot tick handler using the helper methods below.
+ *
+ * <p>FIX BUG #6: executeCraft delegates to {@link CraftingExecutor} for real packet-based crafting.
  */
 public class CraftingManager {
 
@@ -35,7 +37,7 @@ public class CraftingManager {
         return INSTANCE;
     }
 
-    // в”Ђв”Ђ Legacy API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // ── Legacy API ────────────────────────────────────────────────────────────
 
     public void addCraftingRule(String fromItemId, String toItemId, String recipeId) {
         craftingRules.put(fromItemId, new CraftingRule(fromItemId, toItemId, recipeId));
@@ -60,14 +62,10 @@ public class CraftingManager {
     }
     public void clearRules() { craftingRules.clear(); }
 
-    // в”Ђв”Ђ New API using CraftRule в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // ── New API using CraftRule ───────────────────────────────────────────────
 
     /**
      * Counts how many times {@code rule} should fire given the current inventories.
-     *
-     * @param rule        the craft rule to evaluate
-     * @param inventories all chest-contents or player inventory to count trigger items
-     * @return number of times to craft (0 = skip)
      */
     public int countCraftTimes(CraftRule rule, Map<BlockPos, List<ItemStack>> inventories) {
         if (!rule.enabled) return 0;
@@ -104,11 +102,6 @@ public class CraftingManager {
 
     /**
      * Sends a {@code handlePlaceRecipe} packet to fill the crafting grid.
-     * Requires that a crafting container is currently open.
-     *
-     * @param menu   the open crafting/inventory container
-     * @param recipe the crafting recipe to place
-     * @return true if the packet was sent
      */
     public boolean placeRecipe(AbstractContainerMenu menu, CraftingRecipe recipe) {
         Minecraft mc = Minecraft.getInstance();
@@ -124,7 +117,6 @@ public class CraftingManager {
 
     /**
      * Takes the crafting result from slot 0 via QUICK_MOVE.
-     * Call this after {@link #placeRecipe} and a brief tick wait.
      */
     public void collectResult(AbstractContainerMenu menu) {
         Minecraft mc = Minecraft.getInstance();
@@ -133,7 +125,27 @@ public class CraftingManager {
                 menu.containerId, 0, 0, ClickType.QUICK_MOVE, mc.player);
     }
 
-    // в”Ђв”Ђ Helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // ── FIX BUG #6: executeCraft + evaluateCraftRules via CraftingExecutor ───
+
+    /**
+     * FIX BUG #6: Evaluates all CraftRules against current inventories.
+     * Returns a rule-to-craftCount map for rules that should fire this cycle.
+     */
+    public Map<CraftRule, Integer> evaluateCraftRules(
+            List<CraftRule> rules,
+            Map<BlockPos, List<ItemStack>> scannedInventories) {
+        return CraftingExecutor.evaluateRules(rules, scannedInventories);
+    }
+
+    /**
+     * FIX BUG #6: Executes a craft rule using handlePlaceRecipe packets.
+     * Requires an open crafting container (or 2x2 inventory menu for small recipes).
+     */
+    public boolean executeCraft(CraftRule rule, int craftCount) {
+        return CraftingExecutor.executeCraft(rule, craftCount);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static int countItems(ResourceLocation id, Map<BlockPos, List<ItemStack>> inventories) {
         int count = 0;
@@ -150,7 +162,7 @@ public class CraftingManager {
         return count;
     }
 
-    // в”Ђв”Ђ Legacy inner class в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // ── Legacy inner class ────────────────────────────────────────────────────
 
     public static class CraftingRule {
         public final String fromItemId;
@@ -169,4 +181,3 @@ public class CraftingManager {
         }
     }
 }
-

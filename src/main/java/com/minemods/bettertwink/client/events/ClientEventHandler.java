@@ -9,6 +9,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.state.properties.ChestType;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import com.minemods.bettertwink.BetterTwinkMod;
@@ -40,18 +42,25 @@ public class ClientEventHandler {
     }
 
     /**
-     * Обработка открытия контейнера — добавляем его в конфиг при активном Select Mode
+     * Обработка открытия контейнера — добавляем его в конфиг при активном Select Mode.
+     * FIX BUG #9: detects double-chest and sets the isDouble flag accordingly.
+     * FIX BUG #12: notifies ContainerEventHandler that the player opened this chest.
      */
     @SubscribeEvent
     public static void onScreenOpen(ScreenEvent.Init.Post event) {
+        // FIX BUG #12: always track the interacted pos for ContainerEventHandler
+        HitResult hitResult = MC.hitResult;
+        if (hitResult instanceof BlockHitResult blockHit && hitResult.getType() == HitResult.Type.BLOCK) {
+            ContainerEventHandler.notifyPlayerInteracted(blockHit.getBlockPos());
+        }
+
         if (!isSelectingChests) return;
         if (!(event.getScreen() instanceof AbstractContainerScreen<?>)) return;
 
         // Получаем позицию блока по прицелу игрока
-        HitResult hitResult = MC.hitResult;
-        if (!(hitResult instanceof BlockHitResult blockHit) || hitResult.getType() != HitResult.Type.BLOCK) return;
+        if (!(hitResult instanceof BlockHitResult blockHit2) || hitResult.getType() != HitResult.Type.BLOCK) return;
 
-        BlockPos pos = blockHit.getBlockPos();
+        BlockPos pos = blockHit2.getBlockPos();
         ServerConfiguration serverConfig = ConfigurationManager.getInstance().getCurrentServerConfig();
         String posKey = pos.toString();
 
@@ -62,6 +71,16 @@ public class ClientEventHandler {
 
             ChestConfiguration chest = new ChestConfiguration(pos);
             chest.setChestName(blockName + " (" + pos.toShortString() + ")");
+
+            // FIX BUG #9: detect double-chests and set the flag
+            if (MC.level != null && MC.level.getBlockState(pos).getBlock() instanceof ChestBlock) {
+                var state = MC.level.getBlockState(pos);
+                ChestType chestType = state.getValue(ChestBlock.TYPE);
+                if (chestType != ChestType.SINGLE) {
+                    chest.setDouble(true);
+                }
+            }
+
             serverConfig.addChest(chest);
             ConfigurationManager.getInstance().saveCurrentServer();
 

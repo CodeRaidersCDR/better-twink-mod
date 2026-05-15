@@ -21,6 +21,9 @@ import net.minecraft.world.phys.Vec3;
 import com.mojang.logging.LogUtils;
 import com.minemods.bettertwink.config.BetterTwinkConfig;
 import com.minemods.bettertwink.client.stats.BotStats;
+import com.minemods.bettertwink.client.events.ContainerEventHandler;
+import com.minemods.bettertwink.crafting.CraftingManager;
+import com.minemods.bettertwink.crafting.CraftRule;
 import com.minemods.bettertwink.data.ChestConfiguration;
 import com.minemods.bettertwink.data.ConfigurationManager;
 import com.minemods.bettertwink.data.UsageTracker;
@@ -102,6 +105,14 @@ public class SortingBotController {
     private int compactTargetSlot = -1; // non-empty slot used for PICKUP_ALL
     private int compactIterations = 0;  // guards against infinite compact loops
 
+    // FIX BUG #7: deposit verification — track the last attempted deposit slot
+    private boolean depositAttempted  = false;
+    private int     depositAttemptSlot  = -1;
+    private int     depositAttemptCount = 0;
+
+    // FIX BUG #8: scheduled rescan (set by ContainerEventHandler when QD chest closed by player)
+    private int scheduledRescanTicks = -1;
+
     /**
      * Батч содержит один визит к источнику + несколько визитов к приёмникам.
      * allItemIds = объединение всех delivery.
@@ -138,6 +149,22 @@ public class SortingBotController {
         boolean advanceDelivery() {
             deliveryIndex++;
             return deliveryIndex < deliveryOrder.size();
+        }
+
+        /**
+         * Вставляет новый целевой сундук ПОСЛЕ текущего (для переадресации при overflow).
+         * Если target уже есть в deliveryMap — мёрджим ids, иначе добавляем.
+         */
+        void injectDelivery(BlockPos target, List<String> itemIds) {
+            if (deliveryMap.containsKey(target)) {
+                deliveryMap.get(target).addAll(itemIds);
+                // target уже есть в deliveryOrder; перемещаем его сразу за current
+                deliveryOrder.remove(target);
+            } else {
+                deliveryMap.put(target, new ArrayList<>(itemIds));
+            }
+            int insertAt = Math.min(deliveryIndex + 1, deliveryOrder.size());
+            deliveryOrder.add(insertAt, target);
         }
     }
 
@@ -280,6 +307,14 @@ public class SortingBotController {
     // ===================== IDLE ================================
 
     private void tickIdle() {
+        // FIX BUG #8: scheduled rescan triggered by ContainerEventHandler (QD chest closed)
+        if (scheduledRescanTicks > 0) {
+            if (--scheduledRescanTicks == 0) {
+                scheduledRescanTicks = -1;
+                startScanPhase();
+                return;
+            }
+        }
         if (++idleTickCount >= RESCAN_TICKS) {
             idleTickCount = 0;
             startScanPhase();
@@ -391,6 +426,21 @@ public class SortingBotController {
                 .collect(Collectors.toSet());
 
         BlockPos botPos = MC.player != null ? MC.player.blockPosition() : BlockPos.ZERO;
+        // FIX BUG #12: pass currentTick for locked-chest filtering
+        long currentTick = MC.level != null ? MC.level.getGameTime() : 0L;
+
+        // FIX BUG #6: apply craft rules BEFORE routing so results appear in this cycle
+        if (planFuture == null) {
+            List<CraftRule> allRules = new ArrayList<>();
+            for (ChestConfiguration cfg : confMap.values()) allRules.addAll(cfg.getNewCraftRules());
+            if (!allRules.isEmpty()) {
+                Map<CraftRule, Integer> toExecute = CraftingManager.getInstance()
+                        .evaluateCraftRules(allRules, scannedInventories);
+                for (Map.Entry<CraftRule, Integer> e : toExecute.entrySet()) {
+                    CraftingManager.getInstance().executeCraft(e.getKey(), e.getValue());
+                }
+            }
+        }
 
         // §8.1 Async planning — fire task once, wait for result on subsequent ticks
         if (planFuture == null) {
@@ -399,9 +449,11 @@ public class SortingBotController {
             scannedInventories.forEach((k, v) -> invCopy.put(k, List.copyOf(v)));
 
             int totalStacks = invCopy.values().stream().mapToInt(List::size).sum();
-            debugLog("PLANNING (async): " + invCopy.size() + " chests, " + totalStacks + " stacks");
+            // FIX BUG #1: log quickDrop count for diagnostics
+            debugLog("PLANNING: " + invCopy.size() + " chests, " + totalStacks + " stacks, quickDrop=" + quickDropChests.size());
 
-            planFuture = SortPlanner.buildPlanAsync(invCopy, configByPos, quickDropChests, botPos);
+            // FIX BUG #12: pass currentTick to filter locked chests
+            planFuture = SortPlanner.buildPlanAsync(invCopy, configByPos, quickDropChests, botPos, currentTick);
             return; // wait for next tick
         }
 
@@ -428,13 +480,27 @@ public class SortingBotController {
         Map<BlockPos, List<String>> playerDeliveries = new LinkedHashMap<>();
         for (ItemStack stack : MC.player.getInventory().items) {
             if (stack.isEmpty()) continue;
+            // FIX BUG #12: skip locked target chests
             BlockPos target = ItemSortingEngine.findBestChest(stack, configByPos, botPos);
             if (target == null) continue;
+            ChestConfiguration tgt = configByPos.get(target);
+            if (tgt != null && tgt.getLockedUntilTick() > currentTick) continue;
             String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
             playerDeliveries.computeIfAbsent(target, k -> new ArrayList<>()).add(itemId);
         }
         if (!playerDeliveries.isEmpty()) {
             batchQueue.add(new SortingBatch(null, playerDeliveries));
+        }
+
+        // ── Consolidation: merge scattered same-type items into one chest ──────
+        List<SortPlanner.ConsolidationTask> consolidation = SortPlanner.planConsolidation(configByPos, botPos);
+        if (!consolidation.isEmpty()) {
+            debugLog("CONSOLIDATION: " + consolidation.size() + " tasks");
+            for (SortPlanner.ConsolidationTask ct : consolidation) {
+                Map<BlockPos, List<String>> delivs = new LinkedHashMap<>();
+                delivs.computeIfAbsent(ct.dst(), k -> new ArrayList<>()).add(ct.itemId());
+                batchQueue.add(new SortingBatch(ct.src(), delivs));
+            }
         }
 
         debugLog("PLANNING done: " + batchQueue.size() + " batches");
@@ -582,6 +648,7 @@ public class SortingBotController {
         if (isContainerOpen(player)) {
             waitTicks = 4; // wait for ContainerSetContentPacket
             depositSlot = player.containerMenu.slots.size() - 36; // start at first player-inv slot
+            depositAttempted = false; // FIX BUG #7: reset verify state for new chest
             phase = Phase.WORK_DEPOSIT;
         } else if (++openRetries < 3) {
             requestOpenContainer(target);
@@ -597,9 +664,31 @@ public class SortingBotController {
         AbstractContainerMenu menu = player.containerMenu;
         if (!isContainerOpen(player)) {
             debugLog("WORK_DEPOSIT: container closed, advancing delivery");
+            onDepositPhaseComplete();
             finishDelivery(player);
             return;
         }
+
+        // FIX BUG #7: check result of previous deposit attempt
+        if (depositAttempted) {
+            depositAttempted = false;
+            ItemStack afterStack = menu.getSlot(depositAttemptSlot).getItem();
+            int afterCount = afterStack.isEmpty() ? 0 : afterStack.getCount();
+            int placed = depositAttemptCount - afterCount;
+            debugLog("DEPOSIT_RESULT: before=" + depositAttemptCount
+                    + " after=" + afterCount + " placed=" + placed);
+            if (placed == 0) {
+                debugLog("DEPOSIT_FAIL: slot " + depositAttemptSlot
+                        + " unchanged — chest full or move rejected");
+                // FIX BUG #11: chest is full; skip this target and continue
+                onDepositPhaseComplete();
+                player.closeContainer();
+                waitTicks = 3;
+                finishDelivery(player);
+                return;
+            }
+        }
+
         int total = menu.slots.size();
         Set<String> wantedIds = new HashSet<>(currentBatch.currentItemIds());
 
@@ -608,11 +697,73 @@ public class SortingBotController {
             if (!s.isEmpty()) {
                 String id = BuiltInRegistries.ITEM.getKey(s.getItem()).toString();
                 if (wantedIds.contains(id)) {
-                    int slot = depositSlot++;
+                    int slot = depositSlot;
+
+                    // FIX BUG #11: check available space in destination chest
+                    int chestSlots = menu.slots.size() - 36;
+                    int freeSlots = 0;
+                    for (int cs = 0; cs < chestSlots; cs++) {
+                        if (menu.getSlot(cs).getItem().isEmpty()) freeSlots++;
+                    }
+                    if (freeSlots == 0) {
+                        // Chest is full — mark dirty but keep cachedFreeSlots=0 so the planner
+                        // doesn't re-route here before actual rescan (fixes the infinite loop).
+                        String fullKey = currentBatch.currentTarget().toString();
+                        ChestConfiguration fullCfg = ConfigurationManager.getInstance()
+                                .getCurrentServerConfig().getChests().get(fullKey);
+                        if (fullCfg != null) fullCfg.setDirty(true); // NOT invalidateCachedContents!
+                        depositAttempted = false;
+
+                        // Try to redirect to another chest (overflow / empty / same category)
+                        Map<String, ChestConfiguration> confMap2 = ConfigurationManager.getInstance()
+                                .getCurrentServerConfig().getChests();
+                        Map<BlockPos, ChestConfiguration> cfgByPos2 = new HashMap<>();
+                        for (ChestConfiguration c : confMap2.values()) cfgByPos2.put(c.getPosition(), c);
+                        BlockPos botPos2 = MC.player != null ? MC.player.blockPosition() : BlockPos.ZERO;
+
+                        ItemStack sample = s.copy();
+                        sample.setCount(1);
+                        BlockPos overflow = ItemSortingEngine.findBestChest(sample, cfgByPos2, botPos2);
+
+                        if (overflow != null && !overflow.equals(currentBatch.currentTarget())) {
+                            // Claim empty chest category if it has none yet
+                            ChestConfiguration ovCfg = cfgByPos2.get(overflow);
+                            if (ovCfg != null && ovCfg.getPinnedCategory() == null) {
+                                ovCfg.setPinnedCategory(ItemSortingEngine.getCategory(sample));
+                                debugLog("DEPOSIT_FAIL: claimed empty chest " + overflow.toShortString()
+                                        + " for category " + ovCfg.getPinnedCategory());
+                            }
+                            debugLog("DEPOSIT_FAIL: chest " + currentBatch.currentTarget().toShortString()
+                                    + " full — redirecting " + id + " x" + s.getCount()
+                                    + " to " + overflow.toShortString());
+                            // Inject overflow and skip the full target
+                            currentBatch.injectDelivery(overflow, currentBatch.currentItemIds());
+                            currentBatch.advanceDelivery();
+                            player.closeContainer();
+                            waitTicks = 3;
+                            startDeliveries(player);
+                        } else {
+                            debugLog("DEPOSIT_FAIL: chest " + currentBatch.currentTarget()
+                                    + " full — no overflow found, skipping delivery of " + id + " x" + s.getCount());
+                            player.closeContainer();
+                            waitTicks = 3;
+                            finishDelivery(player);
+                        }
+                        return;
+                    }
+
                     debugLog("WORK_DEPOSIT: slot " + slot + " = " + id
                             + " -> " + currentBatch.currentTarget().toShortString());
+
+                    // FIX BUG #7: record attempt so we can verify on next tick
+                    depositAttempted     = true;
+                    depositAttemptSlot   = slot;
+                    depositAttemptCount  = s.getCount();
+
                     MC.gameMode.handleInventoryMouseClick(
                             menu.containerId, slot, 0, ClickType.QUICK_MOVE, MC.player);
+                    depositSlot++;
+
                     // §1.1 Track deposit for preferredChest learning
                     UsageTracker.getInstance().recordBotDeposit(
                             s, currentBatch.currentTarget(), MC.level != null ? MC.level.getGameTime() : 0);
@@ -624,12 +775,32 @@ public class SortingBotController {
             }
             depositSlot++;
         }
-        // Все слоты исчерпаны — переходим к уплотнению сундука
+
+        // All player-inv slots exhausted — move to compact and mark chest dirty
+        onDepositPhaseComplete();
         compactSubState   = 0;
         compactPickedSlot = -1;
         compactTargetSlot = -1;
         compactIterations = 0;
         phase = Phase.WORK_COMPACT_DST;
+    }
+
+    /**
+     * FIX BUG #7: After depositing into a chest, mark it dirty and invalidate cached contents
+     * so the next planning cycle re-scans it instead of using stale data.
+     * Without this, the planner would think the items are still in the source and repeat the plan.
+     */
+    private void onDepositPhaseComplete() {
+        depositAttempted = false;
+        if (currentBatch == null || currentBatch.currentTarget() == null) return;
+        String key = currentBatch.currentTarget().toString();
+        ChestConfiguration targetCfg = ConfigurationManager.getInstance()
+                .getCurrentServerConfig().getChests().get(key);
+        if (targetCfg != null) {
+            // FIX BUG #7: invalidate stale cache so next scan reflects new contents
+            targetCfg.setDirty(true);
+            targetCfg.invalidateCachedContents();
+        }
     }
 
     // ===================== WORK: COMPACT DESTINATION CHEST ====
@@ -652,10 +823,16 @@ public class SortingBotController {
         int chestSlots = menu.slots.size() - 36;
         ItemStack carried = menu.getCarried();
 
+        // Count free slots for diagnostics
+        int freeSlots = 0;
+        for (int i = 0; i < chestSlots; i++) {
+            if (menu.getSlot(i).getItem().isEmpty()) freeSlots++;
+        }
+
         switch (compactSubState) {
             case 0: { // SCAN — find a pair to merge using exact item+NBT comparison
                 if (compactIterations++ > 50) {
-                    debugLog("WORK_COMPACT: max iterations reached, closing chest");
+                    debugLog("WORK_COMPACT: max iterations(" + compactIterations + ") reached, closing chest [freeSlots=" + freeSlots + "]");
                     player.closeContainer();
                     waitTicks = 3;
                     finishDelivery(player);
@@ -681,7 +858,7 @@ public class SortingBotController {
                 }
                 if (pickSlot == -1) {
                     // Nothing to compact — done
-                    debugLog("WORK_COMPACT: done, closing chest");
+                    debugLog("WORK_COMPACT: done (iter=" + compactIterations + ", freeSlots=" + freeSlots + "), closing chest");
                     player.closeContainer();
                     waitTicks = 3;
                     finishDelivery(player);
@@ -689,7 +866,14 @@ public class SortingBotController {
                 }
                 compactPickedSlot = pickSlot;
                 compactTargetSlot = targetSlot;
-                debugLog("WORK_COMPACT: picking up slot " + pickSlot);
+                ItemStack siLog = menu.getSlot(pickSlot).getItem();
+                ItemStack sjLog = menu.getSlot(targetSlot).getItem();
+                String itemId = BuiltInRegistries.ITEM.getKey(siLog.getItem()).toString();
+                debugLog("WORK_COMPACT[" + compactIterations + "]: SCAN pickup slot " + pickSlot
+                        + " (" + itemId + " x" + siLog.getCount() + "/" + siLog.getMaxStackSize() + ")"
+                        + " → merge with slot " + targetSlot
+                        + " (x" + sjLog.getCount() + ")"
+                        + " freeSlots=" + freeSlots);
                 MC.gameMode.handleInventoryMouseClick(
                         menu.containerId, pickSlot, 0, ClickType.PICKUP, MC.player);
                 compactSubState = 1;
@@ -699,9 +883,11 @@ public class SortingBotController {
             case 1: { // AFTER_PICKUP — do PICKUP_ALL on a non-empty slot with the same item
                 if (carried.isEmpty()) {
                     // Pickup somehow failed, rescan
+                    debugLog("WORK_COMPACT: AFTER_PICKUP carried empty (slot " + compactPickedSlot + " vanished?), rescanning");
                     compactSubState = 0;
                     return;
                 }
+                String carriedId = BuiltInRegistries.ITEM.getKey(carried.getItem()).toString();
                 // Find a non-empty slot that matches the carried item (compactTargetSlot may have moved)
                 int allTarget = compactTargetSlot;
                 if (allTarget < 0 || menu.getSlot(allTarget).getItem().isEmpty()) {
@@ -715,8 +901,13 @@ public class SortingBotController {
                     }
                 }
                 if (allTarget >= 0) {
+                    debugLog("WORK_COMPACT: PICKUP_ALL carrying " + carriedId + " x" + carried.getCount()
+                            + " → target slot " + allTarget
+                            + " (x" + menu.getSlot(allTarget).getItem().getCount() + ")");
                     MC.gameMode.handleInventoryMouseClick(
                             menu.containerId, allTarget, 0, ClickType.PICKUP_ALL, MC.player);
+                } else {
+                    debugLog("WORK_COMPACT: PICKUP_ALL no merge target found for " + carriedId + " x" + carried.getCount() + ", will place back");
                 }
                 compactSubState = 2;
                 waitTicks = getTransferTicks();
@@ -724,18 +915,25 @@ public class SortingBotController {
             }
             case 2: { // AFTER_PICKUP_ALL — place consolidated stack back
                 if (carried.isEmpty()) {
+                    debugLog("WORK_COMPACT: PLACE_BACK carried empty (placed by server?), rescanning");
                     compactSubState = 0;
                     return;
                 }
+                String carriedId2 = BuiltInRegistries.ITEM.getKey(carried.getItem()).toString();
                 // Place back to the slot we picked from (it should be empty now)
                 ItemStack slotNow = menu.getSlot(compactPickedSlot).getItem();
                 int placeSlot = compactPickedSlot;
-                if (!slotNow.isEmpty()) {
+                boolean foundEmpty = slotNow.isEmpty();
+                if (!foundEmpty) {
                     // Find first empty slot in chest
                     for (int i = 0; i < chestSlots; i++) {
-                        if (menu.getSlot(i).getItem().isEmpty()) { placeSlot = i; break; }
+                        if (menu.getSlot(i).getItem().isEmpty()) { placeSlot = i; foundEmpty = true; break; }
                     }
                 }
+                debugLog("WORK_COMPACT: PLACE_BACK " + carriedId2 + " x" + carried.getCount()
+                        + " → slot " + placeSlot
+                        + (foundEmpty ? " (empty)" : " (OCCUPIED — no free slot found, placing anyway)")
+                        + " freeSlots=" + freeSlots);
                 MC.gameMode.handleInventoryMouseClick(
                         menu.containerId, placeSlot, 0, ClickType.PICKUP, MC.player);
                 compactSubState = 0; // rescan
@@ -909,6 +1107,8 @@ public class SortingBotController {
     /** Открыть контейнер (правый клик по блоку) */
     private void requestOpenContainer(BlockPos pos) {
         if (MC.player == null) return;
+        // FIX BUG #12: tell ContainerEventHandler the bot is opening this container
+        ContainerEventHandler.notifyBotOpenedContainer(pos);
         Vec3 center = Vec3.atCenterOf(pos);
         Vec3 eye    = MC.player.getEyePosition();
         Vec3 diff   = center.subtract(eye);
@@ -1006,4 +1206,14 @@ public class SortingBotController {
     public void stopSorting()  { stopBot(); }
     public boolean isActive()  { return isRunning; }
     public BlockPos getCurrentTarget2() { return getCurrentTarget(); }
+
+    /**
+     * FIX BUG #8: schedules an unconditional re-scan after {@code ticks} idle ticks.
+     * Called by ContainerEventHandler when the player closes a QuickDrop chest.
+     */
+    public void scheduleRescan(int ticks) {
+        if (isRunning && phase == Phase.IDLE) {
+            scheduledRescanTicks = ticks;
+        }
+    }
 }
