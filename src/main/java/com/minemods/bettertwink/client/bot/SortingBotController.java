@@ -4,6 +4,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtIo;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Player;
@@ -18,18 +20,23 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import com.mojang.logging.LogUtils;
 import com.minemods.bettertwink.config.BetterTwinkConfig;
+import com.minemods.bettertwink.client.stats.BotStats;
 import com.minemods.bettertwink.data.ChestConfiguration;
 import com.minemods.bettertwink.data.ConfigurationManager;
+import com.minemods.bettertwink.data.UsageTracker;
 import com.minemods.bettertwink.pathfinding.PathFinder;
 import com.minemods.bettertwink.sorting.ItemSortingEngine;
+import com.minemods.bettertwink.sorting.SortPlanner;
 import org.slf4j.Logger;
 
+import java.io.File;
 import java.io.FileWriter;
 import java.io.PrintWriter;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -63,6 +70,17 @@ public class SortingBotController {
     private Phase phase = Phase.IDLE;
     private boolean isRunning = false;
     private int waitTicks = 0;
+
+    // §4.1 Humanisation profile (read from config on startBot)
+    private HumanProfile humanProfile = HumanProfile.CASUAL;
+
+    // §8.1 Async planning — main thread fires ForkJoinPool task, waits for result
+    private volatile CompletableFuture<Map<BlockPos, Map<BlockPos, List<String>>>> planFuture = null;
+
+    // §7.3 Crash recovery — save snapshot every N ticks
+    private int snapshotTickCounter = 0;
+    private static final int SNAPSHOT_INTERVAL = 100; // ticks (~5 sec)
+    private static final String SNAPSHOT_FILE = "config/bettertwink/bot-snapshot.nbt";
 
     // анные сканирования
     private final Map<BlockPos, List<ItemStack>> scannedInventories = new LinkedHashMap<>();
@@ -159,6 +177,10 @@ public class SortingBotController {
         if (isRunning) return;
         isRunning = true;
         idleTickCount = 0;
+        // Load humanisation profile from config
+        humanProfile = HumanProfile.fromString(BetterTwinkConfig.HUMAN_PROFILE.get());
+        LOGGER.info("[BetterTwink] Using human profile: {}", humanProfile);
+        loadBotSnapshot();
         startScanPhase();
         LOGGER.info("[BetterTwink] Bot started");
     }
@@ -173,6 +195,9 @@ public class SortingBotController {
         lastNavTarget = null;
         navActive = false;
         navDesiredJump = false;
+        planFuture = null;
+        BotStats.getInstance().resetSession();
+        saveBotSnapshot();
         if (MC.player != null && MC.player.containerMenu != MC.player.inventoryMenu) {
             MC.player.closeContainer();
         }
@@ -184,6 +209,18 @@ public class SortingBotController {
         if (!isRunning || !BetterTwinkConfig.ENABLED.get()) return;
         if (player == null || level == null) return;
         if (waitTicks > 0) { waitTicks--; return; }
+
+        // §4.1 Micro-pause: humanlike random stall between actions
+        if (humanProfile.shouldMicroPause()) {
+            waitTicks = humanProfile.microPauseTicks();
+            return;
+        }
+
+        // §7.3 Crash recovery snapshot
+        if (++snapshotTickCounter >= SNAPSHOT_INTERVAL) {
+            snapshotTickCounter = 0;
+            saveBotSnapshot();
+        }
 
         switch (phase) {
             case IDLE           -> tickIdle();
@@ -292,7 +329,7 @@ public class SortingBotController {
         if (navigateTo(player, level, target)) {
             openRetries = 0;
             requestOpenContainer(target);
-            waitTicks = 7;
+            waitTicks = humanProfile.nextChestDelayTicks();
             phase = Phase.SCAN_WAIT_OPEN;
         }
     }
@@ -306,7 +343,7 @@ public class SortingBotController {
         } else if (++openRetries < 3) {
             // овторная попытка открыть
             requestOpenContainer(scanQueue.get(scanIndex));
-            waitTicks = 7;
+            waitTicks = humanProfile.nextChestDelayTicks();
         } else {
             LOGGER.warn("[BetterTwink] е удалось открыть сундук на {}, пропускаю", scanQueue.get(scanIndex));
             scanIndex++;
@@ -348,68 +385,50 @@ public class SortingBotController {
         Map<BlockPos, ChestConfiguration> configByPos = new HashMap<>();
         for (ChestConfiguration c : confMap.values()) configByPos.put(c.getPosition(), c);
 
-        // QuickDrop chests are always SOURCES — bot empties them into category chests
         Set<BlockPos> quickDropChests = configByPos.entrySet().stream()
                 .filter(e -> e.getValue().isQuickDrop())
                 .map(Map.Entry::getKey)
                 .collect(Collectors.toSet());
 
-        boolean anyExplicitRules = configByPos.values().stream()
-                .anyMatch(c -> !c.getAllowedMods().isEmpty() || !c.getAllowedItems().isEmpty());
+        BlockPos botPos = MC.player != null ? MC.player.blockPosition() : BlockPos.ZERO;
 
-        int totalStacks = scannedInventories.values().stream().mapToInt(List::size).sum();
-        debugLog("PLANNING: " + scannedInventories.size() + " chests, " + totalStacks
-                + " stacks, quickDrop=" + quickDropChests.size() + ", explicitRules=" + anyExplicitRules);
-        for (Map.Entry<BlockPos, List<ItemStack>> e : scannedInventories.entrySet()) {
-            debugLog("  chest " + e.getKey().toShortString() + " -> " + e.getValue().size() + " stacks");
+        // §8.1 Async planning — fire task once, wait for result on subsequent ticks
+        if (planFuture == null) {
+            // Defensive copies before handing off to ForkJoinPool
+            Map<BlockPos, List<ItemStack>> invCopy = new HashMap<>();
+            scannedInventories.forEach((k, v) -> invCopy.put(k, List.copyOf(v)));
+
+            int totalStacks = invCopy.values().stream().mapToInt(List::size).sum();
+            debugLog("PLANNING (async): " + invCopy.size() + " chests, " + totalStacks + " stacks");
+
+            planFuture = SortPlanner.buildPlanAsync(invCopy, configByPos, quickDropChests, botPos);
+            return; // wait for next tick
         }
 
-        ItemSortingEngine engine = ItemSortingEngine.getInstance();
-        if (anyExplicitRules) {
-            engine.analyzeSortingNeeds(configByPos, scannedInventories);
-            if (!engine.hasPendingTasks()) {
-                debugLog("PLANNING: explicit rules -> 0 tasks, using auto-sort");
-                engine.analyzeAutoSorting(scannedInventories, quickDropChests);
-            }
-        } else {
-            engine.analyzeAutoSorting(scannedInventories, quickDropChests);
-        }
+        if (!planFuture.isDone()) return; // still computing
 
-        // Group tasks by source chest -> (target -> item IDs) to form batches
-        Map<BlockPos, Map<BlockPos, List<String>>> batchData = new LinkedHashMap<>();
-        while (engine.hasPendingTasks()) {
-            ItemSortingEngine.SortingTask t = engine.getNextTask();
-            String itemId = BuiltInRegistries.ITEM.getKey(t.item.getItem()).toString();
-            batchData
-                    .computeIfAbsent(t.sourceChest, k -> new LinkedHashMap<>())
-                    .computeIfAbsent(t.targetChest, k -> new ArrayList<>())
-                    .add(itemId);
+        // Future is ready — consume result
+        Map<BlockPos, Map<BlockPos, List<String>>> batchData;
+        try {
+            batchData = planFuture.get();
+        } catch (Exception ex) {
+            LOGGER.error("[BetterTwink] Planning future failed", ex);
+            planFuture = null;
+            phase = Phase.IDLE;
+            return;
         }
+        planFuture = null;
 
         batchQueue.clear();
         for (Map.Entry<BlockPos, Map<BlockPos, List<String>>> e : batchData.entrySet()) {
             batchQueue.add(new SortingBatch(e.getKey(), e.getValue()));
         }
 
-        // --- Also deliver items already in player inventory ---
-        // Build category->chest map from scanned inventories (same dominant-category logic)
-        Map<ItemSortingEngine.ItemCategory, BlockPos> catToChest = new EnumMap<>(ItemSortingEngine.ItemCategory.class);
-        for (Map.Entry<BlockPos, List<ItemStack>> ce : scannedInventories.entrySet()) {
-            if (quickDropChests.contains(ce.getKey())) continue;
-            Map<ItemSortingEngine.ItemCategory, Integer> scores = new EnumMap<>(ItemSortingEngine.ItemCategory.class);
-            for (ItemStack s : ce.getValue()) scores.merge(ItemSortingEngine.getCategory(s), s.getCount(), Integer::sum);
-            if (!scores.isEmpty()) {
-                ItemSortingEngine.ItemCategory dominant = scores.entrySet().stream()
-                        .max(Map.Entry.comparingByValue()).get().getKey();
-                catToChest.putIfAbsent(dominant, ce.getKey());
-            }
-        }
+        // ── Also deliver items already in player inventory ──────────────────
         Map<BlockPos, List<String>> playerDeliveries = new LinkedHashMap<>();
         for (ItemStack stack : MC.player.getInventory().items) {
             if (stack.isEmpty()) continue;
-            ItemSortingEngine.ItemCategory cat = ItemSortingEngine.getCategory(stack);
-            BlockPos target = catToChest.get(cat);
-            if (target == null) target = catToChest.get(ItemSortingEngine.ItemCategory.MISC);
+            BlockPos target = ItemSortingEngine.findBestChest(stack, configByPos, botPos);
             if (target == null) continue;
             String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
             playerDeliveries.computeIfAbsent(target, k -> new ArrayList<>()).add(itemId);
@@ -418,21 +437,17 @@ public class SortingBotController {
             batchQueue.add(new SortingBatch(null, playerDeliveries));
         }
 
-        debugLog("PLANNING: " + batchQueue.size() + " batches");
-        for (SortingBatch b : batchQueue) {
-            debugLog("  BATCH src=" + (b.sourceChest == null ? "PLAYER_INV" : b.sourceChest.toShortString()) + " -> " + b.deliveryOrder.size() + " destinations");
-            for (BlockPos dst : b.deliveryOrder) {
-                debugLog("    dst=" + dst.toShortString() + " items=" + b.deliveryMap.get(dst));
-            }
-        }
+        debugLog("PLANNING done: " + batchQueue.size() + " batches");
         LOGGER.info("[BetterTwink] Planning done: {} batches", batchQueue.size());
 
         if (batchQueue.isEmpty()) {
-            notify("\u00a7a[BetterTwink] \u00a7fВсё отсортировано! (просканировано стаков: " + totalStacks + ") Жду " + (RESCAN_TICKS / 20) + " сек...");
+            int totalStacks = scannedInventories.values().stream().mapToInt(List::size).sum();
+            notify("\u00a7a[BetterTwink] \u00a7fВсё отсортировано! (стаков: " + totalStacks + ") Жду " + (RESCAN_TICKS / 20) + " сек...");
+            BotStats.getInstance().recordSessionComplete();
             phase = Phase.IDLE;
             idleTickCount = 0;
         } else {
-            notify("\u00a7e[BetterTwink] \u00a7fПеремещений: " + batchQueue.size() + " батчей (источников).");
+            notify("\u00a7e[BetterTwink] \u00a7fПеремещений: " + batchQueue.size() + " батчей.");
             currentBatch = batchQueue.poll();
             stuckResets = 0;
             phase = Phase.WORK_NAV_SRC;
@@ -458,7 +473,7 @@ public class SortingBotController {
         if (navigateTo(player, level, currentBatch.sourceChest)) {
             openRetries = 0;
             requestOpenContainer(currentBatch.sourceChest);
-            waitTicks = 7;
+            waitTicks = humanProfile.nextChestDelayTicks();
             phase = Phase.WORK_OPEN_SRC;
         }
     }
@@ -470,7 +485,7 @@ public class SortingBotController {
             phase = Phase.WORK_TAKE;
         } else if (++openRetries < 3) {
             requestOpenContainer(currentBatch.sourceChest);
-            waitTicks = 7;
+            waitTicks = humanProfile.nextChestDelayTicks();
         } else {
             debugLog("WORK_OPEN_SRC: failed to open " + currentBatch.sourceChest.toShortString());
             advanceBatch();
@@ -556,7 +571,7 @@ public class SortingBotController {
         if (navigateTo(player, level, target)) {
             openRetries = 0;
             requestOpenContainer(target);
-            waitTicks = 7;
+            waitTicks = humanProfile.nextChestDelayTicks();
             phase = Phase.WORK_OPEN_DST;
         }
     }
@@ -570,7 +585,7 @@ public class SortingBotController {
             phase = Phase.WORK_DEPOSIT;
         } else if (++openRetries < 3) {
             requestOpenContainer(target);
-            waitTicks = 7;
+            waitTicks = humanProfile.nextChestDelayTicks();
         } else {
             debugLog("WORK_OPEN_DST: failed to open " + target.toShortString() + ", skipping delivery");
             currentBatch.advanceDelivery();
@@ -598,6 +613,11 @@ public class SortingBotController {
                             + " -> " + currentBatch.currentTarget().toShortString());
                     MC.gameMode.handleInventoryMouseClick(
                             menu.containerId, slot, 0, ClickType.QUICK_MOVE, MC.player);
+                    // §1.1 Track deposit for preferredChest learning
+                    UsageTracker.getInstance().recordBotDeposit(
+                            s, currentBatch.currentTarget(), MC.level != null ? MC.level.getGameTime() : 0);
+                    // §6.2 Bot statistics
+                    BotStats.getInstance().recordSort(id, s.getCount());
                     waitTicks = getTransferTicks();
                     return;
                 }
@@ -918,17 +938,61 @@ public class SortingBotController {
         return player.containerMenu != player.inventoryMenu;
     }
 
-    /** адержка между перемещениями предметов в тиках (50ms = 1 тик) */
+    /** Delay between item transfers: uses humanProfile log-normal distribution (§4.1). */
     private int getTransferTicks() {
-        int ms    = BetterTwinkConfig.ITEM_TRANSFER_DELAY.get();
-        int ticks = Math.max(1, ms / 50);
-        ticks    += (int) (Math.random() * 2); // человеческая случайность
-        return ticks;
+        // Enforce MAX_CPS ceiling from config on top of profile delay
+        int minTicksFromCps = Math.max(1, 20 / BetterTwinkConfig.MAX_CPS.get());
+        return Math.max(minTicksFromCps, humanProfile.nextClickDelayTicks());
     }
 
     private void notify(String msg) {
         if (MC.player != null)
             MC.player.displayClientMessage(Component.literal(msg), true);
+    }
+
+    // ===================== CRASH RECOVERY (§7.3) ==============
+
+    /**
+     * Save a lightweight snapshot of bot state.
+     * On next start, if the snapshot exists and bot was running,
+     * we can resume scanning immediately instead of waiting for IDLE timer.
+     */
+    private void saveBotSnapshot() {
+        if (MC.player == null) return;
+        try {
+            File snapshotFile = new File(MC.gameDirectory, SNAPSHOT_FILE);
+            snapshotFile.getParentFile().mkdirs();
+            CompoundTag tag = new CompoundTag();
+            tag.putBoolean("wasRunning", isRunning);
+            tag.putString("phase", phase.name());
+            tag.putLong("savedAt", System.currentTimeMillis());
+            NbtIo.write(tag, snapshotFile);
+        } catch (IOException e) {
+            LOGGER.debug("[BetterTwink] Could not save bot snapshot: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Load snapshot; if bot was running within the last 10 minutes,
+     * skip the idle countdown and start scanning immediately.
+     */
+    private void loadBotSnapshot() {
+        try {
+            File snapshotFile = new File(MC.gameDirectory, SNAPSHOT_FILE);
+            if (!snapshotFile.exists()) return;
+            CompoundTag tag = NbtIo.read(snapshotFile);
+            if (tag == null) return;
+            boolean wasRunning = tag.getBoolean("wasRunning");
+            long savedAt = tag.getLong("savedAt");
+            long ageMs = System.currentTimeMillis() - savedAt;
+            if (wasRunning && ageMs < 10L * 60 * 1000) {
+                // Resume immediately — skip idle wait
+                idleTickCount = RESCAN_TICKS; // trigger immediate scan on next idle tick
+                LOGGER.info("[BetterTwink] Resuming from crash snapshot (age {}s)", ageMs / 1000);
+            }
+        } catch (IOException e) {
+            LOGGER.debug("[BetterTwink] Could not read bot snapshot: {}", e.getMessage());
+        }
     }
 
     // ===================== NAV INPUT GETTERS (читаются BotTickHandler @ Phase.START) =====

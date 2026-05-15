@@ -1,36 +1,29 @@
 package com.minemods.bettertwink.util;
 
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.nbt.Tag;
 
 /**
  * Утилиты для работы с предметами
  */
 public class ItemUtils {
-    
+
     /**
-     * Получает уникальный идентификатор предмета
+     * Получает уникальный идентификатор предмета в формате "minecraft:iron_ingot".
      */
     public static String getItemId(ItemStack item) {
-        if (item.isEmpty()) {
-            return "empty";
-        }
-        return item.getItem().toString();
+        if (item.isEmpty()) return "empty";
+        return BuiltInRegistries.ITEM.getKey(item.getItem()).toString();
     }
 
     /**
-     * Получает мод, из которого предмет
+     * Получает mod-id предмета ("minecraft", "apotheosis", и т.д.)
      */
     public static String getModId(ItemStack item) {
-        if (item.isEmpty()) {
-            return "unknown";
-        }
-        
-        String id = item.getItem().toString();
-        if (id.contains(":")) {
-            return id.split(":")[0];
-        }
-        return "minecraft";
+        if (item.isEmpty()) return "unknown";
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(item.getItem());
+        return key.getNamespace();
     }
 
     /**

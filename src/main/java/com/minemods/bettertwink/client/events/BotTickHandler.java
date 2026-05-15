@@ -11,7 +11,9 @@ import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.core.BlockPos;
 import com.minemods.bettertwink.BetterTwinkMod;
 import com.minemods.bettertwink.client.bot.SortingBotController;
+import com.minemods.bettertwink.client.stats.BotStats;
 import com.minemods.bettertwink.client.storage.ConfigurationPersistence;
+import com.minemods.bettertwink.crafting.RecipeGraph;
 import com.minemods.bettertwink.data.ConfigurationManager;
 
 /**
@@ -79,6 +81,9 @@ public class BotTickHandler {
             lastConfigKey = configKey;
             ConfigurationPersistence.loadConfigurations();
             ConfigurationManager.getInstance().setCurrentServer(serverAddress, getServerName(), playerName);
+            // §8.2 Build recipe graph async on world/account login
+            RecipeGraph.getInstance().invalidate();
+            RecipeGraph.getInstance().buildAsync();
         }
 
         // Обновляем бота

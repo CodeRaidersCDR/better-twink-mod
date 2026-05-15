@@ -2,10 +2,13 @@ package com.minemods.bettertwink.pathfinding;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.CollisionContext;
 
 import java.util.*;
@@ -112,29 +115,38 @@ public class PathFinder {
 
             // ── Flat walk (same Y) ──────────────────────────────
             if (isStandable(level, flat)) {
-                result.add(new Neighbour(flat, 1.0));
+                result.add(new Neighbour(flat, 1.0 + mobCost(level, flat)));
             }
 
             // ── Step up 1 block (stair / raised floor) ──────────
             // Need head-room at current position AND standable at stepUp
             if (isPassable(level, pos.above()) && isStandable(level, stepUp)) {
-                result.add(new Neighbour(stepUp, 1.2));
+                result.add(new Neighbour(stepUp, 1.2 + mobCost(level, stepUp)));
             }
 
             // ── Step down 1 block ────────────────────────────────
             // flat itself must be passable (we walk through it while descending)
             if (isPassable(level, flat) && isStandable(level, stepDown)) {
-                result.add(new Neighbour(stepDown, 1.2));
+                result.add(new Neighbour(stepDown, 1.2 + mobCost(level, stepDown)));
             }
 
             // ── Fall 2 blocks (ledge drop) ───────────────────────
             if (isPassable(level, flat) && isPassable(level, flat.below())
                     && isStandable(level, fall2)) {
-                result.add(new Neighbour(fall2, 1.8));
+                result.add(new Neighbour(fall2, 1.8 + mobCost(level, fall2)));
             }
         }
 
         return result;
+    }
+
+    /**
+     * Returns additional A* cost (+3.0) if a hostile mob occupies {@code pos}.
+     * Makes the pathfinder naturally route around mobs rather than through them.
+     */
+    private double mobCost(Level level, BlockPos pos) {
+        AABB box = AABB.unitCubeFromLowerCorner(Vec3.atLowerCornerOf(pos)).inflate(0.1);
+        return level.getEntitiesOfClass(Mob.class, box).isEmpty() ? 0.0 : 3.0;
     }
 
     // ──────────────────────────────────────────────────────────

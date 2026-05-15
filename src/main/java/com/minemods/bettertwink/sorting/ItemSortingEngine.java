@@ -11,9 +11,11 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.SwordItem;
 import net.minecraft.core.BlockPos;
 import com.minemods.bettertwink.data.ChestConfiguration;
+import com.minemods.bettertwink.data.UsageTracker;
 
 import java.util.*;
 import java.util.stream.Collectors;
+
 
 /**
  * Основной класс логики сортировки предметов
@@ -361,8 +363,58 @@ public class ItemSortingEngine {
         }
     }
 
+    // ── Scoring-based chest selection ─────────────────────────────────────────
+
     /**
-     * Представляет одну задачу сортировки
+     * Calculates a score for storing {@code item} in {@code chest}.
+     * Returns {@link Integer#MIN_VALUE} if the chest cannot accept the item.
+     */
+    public static int scoreChest(ItemStack item, ChestConfiguration chest, BlockPos botPos) {
+        if (item.isEmpty()) return Integer.MIN_VALUE;
+        ChestConfiguration.Role role = chest.getRole();
+        if (role == ChestConfiguration.Role.TRASH || role == ChestConfiguration.Role.QUICK_DROP)
+            return Integer.MIN_VALUE;
+        if (!chest.passesAllow(item)) return Integer.MIN_VALUE;
+        if (chest.passesDeny(item))   return Integer.MIN_VALUE;
+        if (chest.getCachedFreeSlots() == 0 && !chest.hasRoomForStack(item))
+            return Integer.MIN_VALUE;
+        int s = 0;
+        if (chest.matchesExact(item))    s += 1000;
+        if (chest.matchesMod(item))      s += 200;
+        if (chest.matchesCategory(item)) s += 100;
+        if (chest.getCachedContents().containsKey(ItemKey.type(item))) s += 800;
+        if (role == ChestConfiguration.Role.STORAGE
+                && chest.getFilters().isEmpty() && chest.isEmpty()) s += 10;
+        s += chest.getPriority();
+        if (botPos != null) s -= (int)(chest.getPosition().distSqr(botPos) * 0.05);
+        // §1.1 preferredChest bonus: +500 when player consistently deposits this item here
+        s += UsageTracker.getInstance().preferredChestBonus(item, chest.getPosition());
+        return s;
+    }
+
+    /**
+     * Finds the best target chest for {@code item} using {@link #scoreChest}.
+     * Falls back to the first OVERFLOW chest if all scores are &lt;= 0.
+     * Returns null if no suitable chest is found.
+     */
+    public static BlockPos findBestChest(ItemStack item,
+                                         Map<BlockPos, ChestConfiguration> configs,
+                                         BlockPos botPos) {
+        BlockPos best            = null;
+        int      bestScore       = Integer.MIN_VALUE;
+        BlockPos overflowFallback = null;
+        for (Map.Entry<BlockPos, ChestConfiguration> e : configs.entrySet()) {
+            ChestConfiguration c = e.getValue();
+            if (c.getRole() == ChestConfiguration.Role.OVERFLOW && overflowFallback == null)
+                overflowFallback = e.getKey();
+            int s = scoreChest(item, c, botPos);
+            if (s != Integer.MIN_VALUE && s > bestScore) { bestScore = s; best = e.getKey(); }
+        }
+        return (best != null && bestScore > 0) ? best : overflowFallback;
+    }
+
+    /**
+     * Represents a single sorting task
      */
     public static class SortingTask {
         public final BlockPos sourceChest;

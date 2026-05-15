@@ -7,7 +7,9 @@ import net.minecraft.nbt.NbtIo;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 import com.mojang.logging.LogUtils;
+import com.minemods.bettertwink.client.stats.BotStats;
 import com.minemods.bettertwink.data.ConfigurationManager;
+import com.minemods.bettertwink.data.UsageTracker;
 import org.slf4j.Logger;
 
 import java.io.File;
@@ -20,7 +22,9 @@ import java.io.IOException;
 public class ConfigurationPersistence {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final String CONFIG_FOLDER = "config/bettertwink";
-    private static final String CONFIG_FILE = "configurations.nbt";
+    private static final String CONFIG_FILE    = "configurations.nbt";
+    private static final String USAGE_FILE     = "usage-tracker.nbt";
+    private static final String STATS_FILE     = "bot-stats.nbt";
 
     /**
      * Загружает конфигурации с диска
@@ -44,6 +48,28 @@ public class ConfigurationPersistence {
         } catch (IOException e) {
             LOGGER.error("Failed to load configurations", e);
         }
+
+        // §1.1 Load UsageTracker (player preferences)
+        try {
+            File usageFile = new File(getConfigFolder(), USAGE_FILE);
+            if (usageFile.exists()) {
+                CompoundTag tag = NbtIo.read(usageFile);
+                if (tag != null) UsageTracker.getInstance().deserializeNBT(tag);
+            }
+        } catch (IOException e) {
+            LOGGER.warn("Failed to load usage tracker: {}", e.getMessage());
+        }
+
+        // §6.2 Load BotStats
+        try {
+            File statsFile = new File(getConfigFolder(), STATS_FILE);
+            if (statsFile.exists()) {
+                CompoundTag tag = NbtIo.read(statsFile);
+                if (tag != null) BotStats.getInstance().deserializeNBT(tag);
+            }
+        } catch (IOException e) {
+            LOGGER.warn("Failed to load bot stats: {}", e.getMessage());
+        }
     }
 
     /**
@@ -53,12 +79,29 @@ public class ConfigurationPersistence {
         try {
             ensureConfigFolder();
             File configFile = getConfigFile();
-            
             CompoundTag tag = ConfigurationManager.getInstance().serializeNBT();
             NbtIo.write(tag, configFile);
             LOGGER.info("Saved configurations to disk");
         } catch (IOException e) {
             LOGGER.error("Failed to save configurations", e);
+        }
+
+        // §1.1 Save UsageTracker
+        try {
+            ensureConfigFolder();
+            NbtIo.write(UsageTracker.getInstance().serializeNBT(),
+                    new File(getConfigFolder(), USAGE_FILE));
+        } catch (IOException e) {
+            LOGGER.warn("Failed to save usage tracker: {}", e.getMessage());
+        }
+
+        // §6.2 Save BotStats
+        try {
+            ensureConfigFolder();
+            NbtIo.write(BotStats.getInstance().serializeNBT(),
+                    new File(getConfigFolder(), STATS_FILE));
+        } catch (IOException e) {
+            LOGGER.warn("Failed to save bot stats: {}", e.getMessage());
         }
     }
 

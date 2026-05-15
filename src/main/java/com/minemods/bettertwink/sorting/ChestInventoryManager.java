@@ -1,6 +1,8 @@
 package com.minemods.bettertwink.sorting;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.core.BlockPos;
 
@@ -28,11 +30,46 @@ public class ChestInventoryManager {
     }
 
     /**
-     * Перемещает предмет из одного слота в другой с гуманизированной задержкой
+     * Performs an immediate shift-click (QUICK_MOVE) on the given slot to move an item.
+     * The {@code delayMs} parameter is advisory — actual timing is controlled externally
+     * via the tick handler's {@code waitTicks} mechanism.
      */
     public void moveItemWithDelay(AbstractContainerMenu sourceChest, AbstractContainerMenu targetChest,
                                   int sourceSlot, long delayMs) {
-        // Будет реализовано с использованием Minecraft packet system
+        quickMoveSlot(sourceChest, sourceSlot);
+    }
+
+    /**
+     * Performs a shift-click (QUICK_MOVE) on {@code slot} in {@code menu}.
+     * Safe to call even if the Minecraft game mode is unavailable.
+     */
+    public static void quickMoveSlot(AbstractContainerMenu menu, int slot) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.gameMode == null || mc.player == null) return;
+        ItemStack item = menu.getSlot(slot).getItem();
+        if (item.isEmpty()) return;
+        mc.gameMode.handleInventoryMouseClick(
+                menu.containerId, slot, 0, ClickType.QUICK_MOVE, mc.player);
+    }
+
+    /**
+     * Performs a left-click PICKUP on {@code slot} (picks up or puts down the cursor stack).
+     */
+    public static void pickupSlot(AbstractContainerMenu menu, int slot) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.gameMode == null || mc.player == null) return;
+        mc.gameMode.handleInventoryMouseClick(
+                menu.containerId, slot, 0, ClickType.PICKUP, mc.player);
+    }
+
+    /**
+     * Performs PICKUP_ALL (double-click) on {@code slot} to consolidate stacks.
+     */
+    public static void pickupAllSlot(AbstractContainerMenu menu, int slot) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.gameMode == null || mc.player == null) return;
+        mc.gameMode.handleInventoryMouseClick(
+                menu.containerId, slot, 0, ClickType.PICKUP_ALL, mc.player);
     }
 
     /**
