@@ -1,0 +1,9 @@
+Manifest-Version: 1.0
+Specification-Title: bettertwink
+Specification-Vendor: minemods
+Specification-Version: 1
+Implementation-Title: better-twink-mod
+Implementation-Version: 1.0.0
+Implementation-Vendor: minemods
+Implementation-Timestamp: 2026-05-15T23:04:26+0400
+

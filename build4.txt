@@ -1,0 +1,33 @@
+Picked up _JAVA_OPTIONS: -Xmx12288M
+To honour the JVM settings for this build a single-use Daemon process will be forked. See https://docs.gradle.org/8.1.1/userguide/gradle_daemon.html#sec:disabling_the_daemon.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+Java: 17.0.7, JVM: 17.0.7+8-LTS-224 (Oracle Corporation), Arch: amd64
+
+> Task :compileJava
+Note: E:\minemods\better-twink-mod\src\main\java\com\minemods\bettertwink\client\gui\ItemSearchDropdown.java uses or overrides a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+
+> Task :processResources UP-TO-DATE
+> Task :classes
+> Task :jar
+> Task :downloadMcpConfig
+> Task :extractSrg UP-TO-DATE
+> Task :createMcpToSrg UP-TO-DATE
+
+> Task :reobfJar
+Picked up _JAVA_OPTIONS: -Xmx12288M
+
+> Task :jarJar SKIPPED
+> Task :reobfJarJar SKIPPED
+> Task :assemble
+> Task :compileTestJava NO-SOURCE
+> Task :processTestResources NO-SOURCE
+> Task :testClasses UP-TO-DATE
+> Task :test NO-SOURCE
+> Task :check UP-TO-DATE
+> Task :build
+
+BUILD SUCCESSFUL in 13s
+7 actionable tasks: 4 executed, 3 up-to-date

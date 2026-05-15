@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+displayTest="IGNORE_ALL_VERSION"
+
+[[mods]]
+modId="bettertwink"
+version="1.0.0"
+displayName="Better Twink"
+authors="minemods"
+description='''A client-side bot mod for organizing items in chests'''
+
+[[dependencies.bettertwink]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="CLIENT"
+
+[[dependencies.bettertwink]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.21)"
+    ordering="NONE"
+    side="CLIENT"
+

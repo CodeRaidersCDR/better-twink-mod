@@ -1,0 +1,22 @@
+{
+  "bettertwink.gui.settings": "Better Twink Settings",
+  "bettertwink.gui.chest_detail": "Chest Configuration",
+  "bettertwink.gui.mod_filter": "Mod Filter",
+  "bettertwink.gui.item_filter": "Item Filter",
+  "bettertwink.gui.crafting_rules": "Crafting Rules",
+  "bettertwink.button.add_chest": "Add Chest",
+  "bettertwink.button.edit_selected": "Edit Selected",
+  "bettertwink.button.remove": "Remove",
+  "bettertwink.button.add_mod_filter": "Add Mod Filter",
+  "bettertwink.button.add_item_filter": "Add Item Filter",
+  "bettertwink.button.crafting_rules": "Crafting Rules",
+  "bettertwink.button.save": "Save",
+  "bettertwink.button.back": "Back",
+  "bettertwink.label.quick_drop": "Quick Drop Chest",
+  "bettertwink.label.allowed_mods": "Allowed Mods:",
+  "bettertwink.label.allowed_items": "Allowed Items:",
+  "bettertwink.label.auto_sort": "Auto Sort",
+  "bettertwink.label.search_chests": "Search chests...",
+  "bettertwink.label.chest_name": "Chest Name",
+  "bettertwink.label.position": "Position: "
+}

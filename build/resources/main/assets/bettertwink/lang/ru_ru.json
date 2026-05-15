@@ -1,0 +1,22 @@
+{
+  "bettertwink.gui.settings": "Настройки Better Twink",
+  "bettertwink.gui.chest_detail": "Конфигурация сундука",
+  "bettertwink.gui.mod_filter": "Фильтр модов",
+  "bettertwink.gui.item_filter": "Фильтр предметов",
+  "bettertwink.gui.crafting_rules": "Правила крафта",
+  "bettertwink.button.add_chest": "Добавить сундук",
+  "bettertwink.button.edit_selected": "Редактировать",
+  "bettertwink.button.remove": "Удалить",
+  "bettertwink.button.add_mod_filter": "Добавить фильтр модов",
+  "bettertwink.button.add_item_filter": "Добавить фильтр предметов",
+  "bettertwink.button.crafting_rules": "Правила крафта",
+  "bettertwink.button.save": "Сохранить",
+  "bettertwink.button.back": "Назад",
+  "bettertwink.label.quick_drop": "Сундук быстрого сброса",
+  "bettertwink.label.allowed_mods": "Разрешенные моды:",
+  "bettertwink.label.allowed_items": "Разрешенные предметы:",
+  "bettertwink.label.auto_sort": "Авто сортировка",
+  "bettertwink.label.search_chests": "Поиск сундуков...",
+  "bettertwink.label.chest_name": "Имя сундука",
+  "bettertwink.label.position": "Позиция: "
+}
